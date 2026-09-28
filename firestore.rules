@@ -1,0 +1,165 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // HarvestHub — Security Rules & Role-Based Access Control (RBAC)
+    // Conforms strictly with SRS Section 1.4 & 1.5 Security Constraints
+    // ===============================================================
+
+    // Helper functions for authentication and role verification
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return request.auth.token.role != null
+        ? request.auth.token.role
+        : (exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? getUserData().role : '');
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'admin@harvesthub.com' ||
+        getUserRole() == 'Admin'
+      );
+    }
+
+    function isFarmer() {
+      return isAuthenticated() && (getUserRole() == 'Farmer' || isAdmin());
+    }
+
+    function isCustomer() {
+      return isAuthenticated() && (getUserRole() == 'Customer' || isAdmin());
+    }
+
+    // ---------------------------------------------------------------
+    // 1. Users Directory (Customer, Farmer, Admin Profiles)
+    // ---------------------------------------------------------------
+    match /users/{userId} {
+      // Authenticated users can view profile cards (e.g. farmer mandi names)
+      allow read: if isAuthenticated();
+      // Registration: User creates their own document upon signup; Admin can create accounts
+      allow create: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      // Updates: Profile owner updates their info (e.g. phone, address, farmName); Admin has override
+      allow update: if isOwner(userId) || isAdmin();
+      // Deletions: Restricted strictly to platform administrator
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // 2. Product Catalog (Farm Produce Listings)
+    // ---------------------------------------------------------------
+    match /products/{productId} {
+      // Open read access for digital marketplace discovery and browsing
+      allow read: if true;
+      // Creation: Only verified farmers (or admin) can list farm produce
+      allow create: if isFarmer();
+      // Modification & Removal: Farmers manage only their own listings; Admin can moderate any
+      allow update, delete: if isFarmer() && (
+        resource.data.farmerId == request.auth.uid ||
+        resource.data.farmerId == ('farmer_' + request.auth.uid) ||
+        isAdmin()
+      );
+    }
+
+    // ---------------------------------------------------------------
+    // 3. Product Categories (Fruits, Vegetables, Grains, Organic, etc.)
+    // ---------------------------------------------------------------
+    match /categories/{categoryId} {
+      // Browsable by all users for filtering and search tags
+      allow read: if true;
+      // Managed exclusively by administrators via the Admin Console
+      allow write: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // 4. Orders & Fulfillment Lifecycle
+    // ---------------------------------------------------------------
+    match /orders/{orderId} {
+      // Read: Customers inspect their own orders; Farmers view incoming orders for their farm; Admins monitor all
+      allow read: if isAuthenticated() && (
+        resource.data.customerId == request.auth.uid ||
+        resource.data.farmerId == request.auth.uid ||
+        isAdmin()
+      );
+      // Create: Authenticated customers place orders
+      allow create: if isCustomer();
+      // Update: Farmers advance status (Pending -> Processing -> Ready -> Completed); Customers can cancel pending
+      allow update: if isAuthenticated() && (
+        resource.data.customerId == request.auth.uid ||
+        resource.data.farmerId == request.auth.uid ||
+        isAdmin()
+      );
+      // Hard delete restricted to admin
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // 5. Mandi Markets & Farmers Public Profiles
+    // ---------------------------------------------------------------
+    match /markets/{marketId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /farmers_market/{marketId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /farmers/{farmerId} {
+      allow read: if true;
+      allow create, update: if isFarmer() || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // 6. Bids & Mandi Auctions (SRS Bidding Feature)
+    // ---------------------------------------------------------------
+    match /bids/{bidId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated() && (
+        resource.data.bidderId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    // ---------------------------------------------------------------
+    // 7. Dispute Resolution & Customer Grievances
+    // ---------------------------------------------------------------
+    match /disputes/{disputeId} {
+      allow read: if isAuthenticated() && (
+        resource.data.raisedBy == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // 8. In-App Notifications & Alerts
+    // ---------------------------------------------------------------
+    match /notifications/{notifId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        resource.data.recipientId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+  }
+}
